@@ -1,0 +1,11 @@
+*.ovpn
+*.key
+*.pem
+*.crt
+*.tar.gz
+*.p12
+*.pfx
+.env
+.env.*
+__pycache__/
+network_data.csv
