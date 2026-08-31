@@ -13,22 +13,51 @@ import time
 import monitor
 
 
-def run_single_measurement(host, count, speed_test=False):
+def resolve_protocol(protocol, detected_protocol, detected_status):
+    """Apply an optional protocol override while preserving auto-detection defaults."""
+    if protocol is None or str(protocol).lower() == "auto":
+        return detected_protocol, detected_status
+
+    normalized = str(protocol).strip().lower()
+    if normalized in {"wireguard", "openvpn", "vless", "direct"}:
+        if normalized == "direct":
+            return "direct", "Disconnected"
+        return normalized, "Connected"
+
+    if normalized in {"wireguard", "wg"}:
+        return "wireguard", "Connected"
+    if normalized in {"openvpn", "ovpn"}:
+        return "openvpn", "Connected"
+    if normalized in {"vless", "xray"}:
+        return "vless", "Connected"
+
+    return detected_protocol, detected_status
+
+
+def run_single_measurement(host, count, speed_test=False, protocol="auto", port=443):
     """Run one measurement and append it to the dataset."""
     try:
-        protocol, vpn_status = monitor.detect_wireguard_vpn()
-        return_code, output = monitor.run_ping(host, count)
-        metrics = monitor.parse_ping_output(output)
+        detected_protocol, detected_status = monitor.detect_protocol_state()
+        protocol, vpn_status = resolve_protocol(protocol, detected_protocol, detected_status)
+        protocol = monitor.normalize_protocol_name(protocol)
+
+        if protocol == "vless" and vpn_status == "Connected":
+            metrics = monitor.measure_connection_metrics(host, count=count, protocol="vless", port=port)
+            output = "Proxy-aware VLESS measurement via SOCKS5 127.0.0.1:10808"
+            return_code = 0 if metrics["packet_loss_pct"] < 100.0 else 1
+        else:
+            return_code, output = monitor.run_ping(host, count)
+            metrics = monitor.parse_ping_output(output)
 
         if return_code not in (0, 1):
-            print(f"  Warning: ping failed with exit code {return_code}.", file=sys.stderr)
+            print(f"  Warning: measurement failed with exit code {return_code}.", file=sys.stderr)
             return False
 
         download_mbps = ""
         upload_mbps = ""
         if speed_test:
             try:
-                download_val, upload_val = monitor.measure_throughput()
+                download_val, upload_val = monitor.measure_throughput(protocol)
                 if download_val is not None and upload_val is not None:
                     download_mbps = f"{download_val:.2f}"
                     upload_mbps = f"{upload_val:.2f}"
@@ -41,7 +70,7 @@ def run_single_measurement(host, count, speed_test=False):
 
         monitor.print_results(host, metrics, protocol, vpn_status)
         if output.strip():
-            print("  Ping output:\n" + output.strip())
+            print("  Measurement output:\n" + output.strip())
 
         csv_path = os.path.join(os.path.dirname(monitor.__file__) or ".", "network_data.csv")
         monitor.append_measurement(
@@ -93,6 +122,18 @@ def main():
         action="store_true",
         help="Run a speed test during each measurement when available.",
     )
+    parser.add_argument(
+        "--protocol",
+        default="auto",
+        choices=["auto", "wireguard", "openvpn", "vless", "direct"],
+        help="Override detection and record a specific protocol label. Default: auto.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=443,
+        help="TCP port used for proxy-aware VLESS and optional protocol-specific checks (default: 443).",
+    )
     args = parser.parse_args()
 
     if args.count <= 0:
@@ -109,7 +150,13 @@ def main():
 
     for index in range(1, args.measurements + 1):
         print(f"\nMeasurement {index}/{args.measurements}")
-        success = run_single_measurement(args.host, args.count, speed_test=args.speed_test)
+        success = run_single_measurement(
+            args.host,
+            args.count,
+            speed_test=args.speed_test,
+            protocol=args.protocol,
+            port=args.port,
+        )
         if not success:
             print("  Measurement failed or was skipped; continuing to the next one.")
 

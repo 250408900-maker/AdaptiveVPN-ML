@@ -5,8 +5,10 @@ import csv
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 CSV_COLUMNS = [
@@ -93,6 +95,112 @@ def parse_ping_output(output):
     }
 
 
+def socks5_connect_via_proxy(host, port, proxy_host="127.0.0.1", proxy_port=10808, timeout=2.0):
+    """Open a SOCKS5 TCP connection through the local VLESS/v2rayN proxy.
+
+    This is intentionally lightweight and standard-library only. It is used for
+    VLESS measurement quality checks because ordinary ICMP ping does not reliably
+    traverse the proxy path in v2rayN system-proxy mode.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect((proxy_host, proxy_port))
+
+    handshake = b"\x05\x01\x00"
+    sock.sendall(handshake)
+    response = sock.recv(2)
+    if len(response) != 2 or response[0] != 0x05 or response[1] != 0x00:
+        sock.close()
+        raise OSError("Proxy handshake failed")
+
+    # CONNECT to the target host. IPv4 or domain names are both supported.
+    try:
+        target_ip = socket.inet_aton(host)
+        addr_type = 0x01
+        addr_bytes = target_ip
+    except OSError:
+        addr_type = 0x03
+        host_bytes = host.encode("idna")
+        addr_bytes = bytes([len(host_bytes)]) + host_bytes
+
+    if addr_type == 0x01:
+        request = b"\x05\x01\x00\x01" + addr_bytes + socket.htons(port).to_bytes(2, byteorder="big")
+    else:
+        request = b"\x05\x01\x00\x03" + addr_bytes + socket.htons(port).to_bytes(2, byteorder="big")
+
+    sock.sendall(request)
+    response = sock.recv(10)
+    if len(response) < 2:
+        sock.close()
+        raise OSError("Proxy CONNECT response was incomplete")
+    if response[0] != 0x05 or response[1] != 0x00:
+        sock.close()
+        raise OSError(f"Proxy CONNECT failed with SOCKS5 status {response[1]}")
+
+    # A successful CONNECT means we reached the target through the proxy path.
+    return sock
+
+
+def measure_vless_proxy_metrics(host, count=4, port=443, timeout=2.5):
+    """Measure latency, loss, and jitter through the VLESS proxy path.
+
+    Because the VLESS route is not visible to ICMP, the probe uses repeated
+    lightweight SOCKS5 CONNECT requests to the target via 127.0.0.1:10808 and
+    derives metrics from success/failure and elapsed connection time.
+    """
+    latencies = []
+    failed_attempts = 0
+
+    for _ in range(max(1, int(count))):
+        start = time.perf_counter()
+        try:
+            proxy_sock = socks5_connect_via_proxy(host, port, timeout=timeout)
+            proxy_sock.close()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            latencies.append(elapsed_ms)
+        except OSError:
+            failed_attempts += 1
+
+    if not latencies:
+        return {
+            "latency_ms": 0.0,
+            "packet_loss_pct": 100.0,
+            "jitter_ms": 0.0,
+            "samples": [],
+        }
+
+    latency_avg = sum(latencies) / len(latencies)
+    jitter = 0.0
+    if len(latencies) > 1:
+        deltas = [abs(latencies[index] - latencies[index - 1]) for index in range(1, len(latencies))]
+        jitter = sum(deltas) / len(deltas)
+
+    loss_pct = (failed_attempts / max(1, count)) * 100.0
+    return {
+        "latency_ms": latency_avg,
+        "packet_loss_pct": loss_pct,
+        "jitter_ms": jitter,
+        "samples": latencies,
+    }
+
+
+def measure_connection_metrics(host, count=4, protocol="direct", port=443, timeout=2.5):
+    """Return latency, loss, and jitter for the active protocol.
+
+    Direct, WireGuard, and OpenVPN continue to use ICMP ping. For VLESS we use a
+    SOCKS5 proxy-aware TCP probe because ICMP does not traverse the proxy path.
+    """
+    normalized = str(protocol or "direct").strip().lower()
+    if normalized == "vless":
+        return measure_vless_proxy_metrics(host, count=count, port=port, timeout=timeout)
+
+    return_code, output = run_ping(host, count)
+    metrics = parse_ping_output(output)
+    metrics["return_code"] = return_code
+    metrics["output"] = output
+    return metrics
+
+
 def run_powershell_json(command):
     """Run a PowerShell command and return parsed JSON output if available."""
     try:
@@ -143,11 +251,34 @@ def normalize_media_state(value):
     return str(value).strip().lower()
 
 
+def normalize_protocol_name(protocol):
+    """Normalize protocol labels to the canonical lowercase dataset values."""
+    normalized = str(protocol or "direct").strip().lower()
+    if normalized in {"", "none", "null", "direct"}:
+        return "direct"
+    if normalized in {"wireguard", "wg"}:
+        return "wireguard"
+    if normalized in {"openvpn", "ovpn"}:
+        return "openvpn"
+    if normalized in {"vless", "vless/xray", "xray"}:
+        return "vless"
+    return normalized
+
+
 def get_connection_label(protocol, vpn_status):
-    """Map the detected VPN state to a simple dataset label."""
-    if protocol == "WireGuard" and vpn_status == "Connected":
-        return "vpn"
-    return "no_vpn"
+    """Map protocol/state to a simple dataset label.
+
+    This keeps the CSV readable for downstream analysis while distinguishing
+    direct internet access from VPN/proxy traffic.
+    """
+    normalized = normalize_protocol_name(protocol)
+    if normalized in {"direct", "none"}:
+        return "direct"
+    if normalized in {"wireguard", "openvpn"}:
+        return "vpn" if vpn_status == "Connected" else "direct"
+    if normalized == "vless":
+        return "proxy" if vpn_status == "Connected" else "direct"
+    return "direct"
 
 
 def check_wireguard_vpn(adapters, ip_addresses):
@@ -176,18 +307,59 @@ def check_wireguard_vpn(adapters, ip_addresses):
         if not has_valid_ip:
             continue
 
-        return "WireGuard", "Connected"
+        return "wireguard", "Connected"
 
-    return "None", "Disconnected"
+    return None
 
 
-def detect_vpn_connection():
-    """Detect the current active VPN protocol or report no VPN connection.
+def check_openvpn_vpn(adapters, ip_addresses):
+    """Return OpenVPN state if an active OpenVPN adapter is present.
 
-    This is the generic entry point for future multi-protocol detection. For now,
-    only WireGuard is supported, and the logic intentionally mirrors the original
-    behavior so the project remains stable while future protocols can be added.
+    This uses the same adapter/IP checks as WireGuard, but is intentionally
+    separated so the detector can be expanded for future protocols without
+    changing the public API.
     """
+    for adapter in adapters:
+        name = str(adapter.get("Name", "")).strip()
+        description = str(adapter.get("InterfaceDescription", "")).strip()
+        status = str(adapter.get("Status", "")).strip().lower()
+        media_state = normalize_media_state(adapter.get("MediaConnectionState"))
+        combined = (name + " " + description).lower()
+
+        if "openvpn" not in combined and not re.search(r"(tun|tap)[0-9]+", combined):
+            continue
+
+        if status != "up" or media_state not in {"connected", "up"}:
+            continue
+
+        assigned_ips = [
+            entry.get("IPAddress", "")
+            for entry in ip_addresses
+            if str(entry.get("InterfaceAlias", "")).lower() == name.lower()
+        ]
+        if not assigned_ips:
+            continue
+
+        has_valid_ip = any(is_valid_ip_address(item) for item in assigned_ips)
+        if not has_valid_ip:
+            continue
+
+        return "openvpn", "Connected"
+
+    return None
+
+
+def check_vless_proxy():
+    """Check whether the local v2rayN SOCKS/HTTP proxy is available on 127.0.0.1:10808."""
+    try:
+        with socket.create_connection(("127.0.0.1", 10808), timeout=1.0):
+            return "vless", "Connected"
+    except OSError:
+        return None
+
+
+def detect_protocol_state():
+    """Detect the current active protocol or fall back to direct internet access."""
     adapters = run_powershell_json(
         "Get-NetAdapter | Select-Object Name, InterfaceDescription, Status, MediaConnectionState | ConvertTo-Json -Depth 10"
     )
@@ -200,17 +372,38 @@ def detect_vpn_connection():
     if not isinstance(ip_addresses, list):
         ip_addresses = []
 
-    # Future protocol checks can be added here in order of preference.
-    wireguard_result = check_wireguard_vpn(adapters, ip_addresses)
-    if wireguard_result[0] != "None":
-        return wireguard_result
+    checks = [
+        lambda: check_wireguard_vpn(adapters, ip_addresses),
+        lambda: check_openvpn_vpn(adapters, ip_addresses),
+        lambda: check_vless_proxy(),
+    ]
 
-    return "None", "Disconnected"
+    for check in checks:
+        result = check()
+        if result is not None:
+            return result
+
+    return "direct", "Disconnected"
+
+
+def detect_vpn_connection():
+    """Backward-compatible generic wrapper returning (protocol, status)."""
+    return detect_protocol_state()
 
 
 def detect_wireguard_vpn():
     """Backward-compatible wrapper for the original WireGuard-only detection."""
-    return detect_vpn_connection()
+    result = check_wireguard_vpn(
+        run_powershell_json(
+            "Get-NetAdapter | Select-Object Name, InterfaceDescription, Status, MediaConnectionState | ConvertTo-Json -Depth 10"
+        ),
+        run_powershell_json(
+            "Get-NetIPAddress | Select-Object InterfaceAlias, IPAddress, AddressFamily, Type | ConvertTo-Json -Depth 10"
+        ),
+    )
+    if result is None:
+        return "direct", "Disconnected"
+    return result
 
 
 def print_results(host, metrics, protocol="None", vpn_status="Disconnected"):
@@ -282,7 +475,8 @@ def append_measurement(csv_path, host, metrics, protocol="None", vpn_status="Dis
     """Append one completed measurement to the CSV dataset."""
     ensure_csv_header(csv_path)
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    connection_label = get_connection_label(protocol, vpn_status)
+    normalized_protocol = normalize_protocol_name(protocol)
+    connection_label = get_connection_label(normalized_protocol, vpn_status)
 
     with open(csv_path, "a", newline="", encoding="utf-8") as csv_file:
         writer = csv.writer(csv_file)
@@ -290,7 +484,7 @@ def append_measurement(csv_path, host, metrics, protocol="None", vpn_status="Dis
             [
                 timestamp,
                 host,
-                protocol,
+                normalized_protocol,
                 vpn_status,
                 connection_label,
                 f"{metrics['latency_ms']:.2f}",
@@ -302,9 +496,39 @@ def append_measurement(csv_path, host, metrics, protocol="None", vpn_status="Dis
         )
 
 
-def measure_throughput():
-    """Run a speed test if the speedtest-cli dependency is available."""
+def measure_throughput(protocol="auto"):
+    """Measure throughput using speedtest-cli while honoring the active proxy path.
+
+    When the active protocol is VLESS, the local v2rayN SOCKS proxy on
+    127.0.0.1:10808 is used so the measurement traverses the configured proxy.
+    For direct/VPN traffic, the system default route is used and no proxy env
+    variables are injected.
+    """
+    normalized = str(protocol or "auto").strip().lower()
+    if normalized == "auto":
+        detected_protocol, _ = detect_protocol_state()
+        normalized = str(detected_protocol or "direct").strip().lower()
+
+    proxy_env = {}
+    if normalized == "vless":
+        try:
+            with socket.create_connection(("127.0.0.1", 10808), timeout=1.5):
+                proxy_env = {
+                    "HTTP_PROXY": "socks5h://127.0.0.1:10808",
+                    "HTTPS_PROXY": "socks5h://127.0.0.1:10808",
+                    "ALL_PROXY": "socks5h://127.0.0.1:10808",
+                    "NO_PROXY": "localhost,127.0.0.1",
+                }
+        except OSError:
+            print(
+                "Warning: VLESS proxy at 127.0.0.1:10808 is not available; throughput test skipped.",
+                file=sys.stderr,
+            )
+            return None, None
+
     try:
+        env = os.environ.copy()
+        env.update(proxy_env)
         result = subprocess.run(
             [sys.executable, "-m", "speedtest", "--json"],
             capture_output=True,
@@ -312,6 +536,7 @@ def measure_throughput():
             encoding="utf-8",
             errors="replace",
             timeout=90,
+            env=env,
         )
     except FileNotFoundError:
         print(
@@ -373,6 +598,12 @@ def main():
         action="store_true",
         help="Run a speed test using speedtest-cli and record download/upload Mbps.",
     )
+    parser.add_argument(
+        "--protocol",
+        default="auto",
+        choices=["auto", "wireguard", "openvpn", "vless", "direct"],
+        help="Override protocol detection and record a specific protocol label. Default: auto.",
+    )
     args = parser.parse_args()
 
     if args.count <= 0:
@@ -380,7 +611,16 @@ def main():
         return 1
 
     try:
-        protocol, vpn_status = detect_wireguard_vpn()
+        detected_protocol, detected_status = detect_protocol_state()
+        if args.protocol == "auto":
+            protocol, vpn_status = detected_protocol, detected_status
+        else:
+            normalized = str(args.protocol).strip().lower()
+            if normalized == "direct":
+                protocol, vpn_status = "direct", "Disconnected"
+            else:
+                protocol, vpn_status = normalized, "Connected"
+
         return_code, output = run_ping(args.host, args.count)
         metrics = parse_ping_output(output)
 
@@ -396,7 +636,7 @@ def main():
         download_mbps = ""
         upload_mbps = ""
         if args.speed_test:
-            download_mbps, upload_mbps = measure_throughput()
+            download_mbps, upload_mbps = measure_throughput(protocol)
             if download_mbps is not None and upload_mbps is not None:
                 print(f"Download throughput: {download_mbps:.2f} Mbps")
                 print(f"Upload throughput: {upload_mbps:.2f} Mbps")

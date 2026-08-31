@@ -9,3 +9,9 @@
 .env.*
 __pycache__/
 network_data.csv
+*.ppk
+id_rsa*
+id_ed25519*
+.vscode/
+.DS_Store
+Thumbs.db
