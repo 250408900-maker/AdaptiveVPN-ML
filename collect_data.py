@@ -10,6 +10,7 @@ import os
 import sys
 import time
 
+import adaptive_selector
 import monitor
 
 
@@ -53,18 +54,18 @@ def run_single_measurement(host, count, speed_test=False, protocol="auto", port=
             print(f"  Warning: measurement failed with exit code {return_code}.", file=sys.stderr)
             return False
 
-        download_mbps = ""
-        upload_mbps = ""
+        download_mbps = None
+        upload_mbps = None
         if speed_test:
             try:
                 download_val, upload_val = monitor.measure_throughput(protocol)
                 if download_val is not None and upload_val is not None:
-                    download_mbps = f"{download_val:.2f}"
-                    upload_mbps = f"{upload_val:.2f}"
-                    print(f"  Download throughput: {download_mbps} Mbps")
-                    print(f"  Upload throughput: {upload_mbps} Mbps")
+                    download_mbps = float(download_val)
+                    upload_mbps = float(upload_val)
+                    print(f"  Download throughput: {download_mbps:.2f} Mbps")
+                    print(f"  Upload throughput: {upload_mbps:.2f} Mbps")
                 else:
-                    print("  Warning: speed test could not complete; saving empty values.")
+                    print("  Warning: speed test could not complete; leaving throughput values empty.")
             except Exception as exc:
                 print(f"  Warning: speed test error: {exc}", file=sys.stderr)
 
@@ -73,7 +74,7 @@ def run_single_measurement(host, count, speed_test=False, protocol="auto", port=
             print("  Measurement output:\n" + output.strip())
 
         csv_path = os.path.join(os.path.dirname(monitor.__file__) or ".", "network_data.csv")
-        monitor.append_measurement(
+        row = monitor.append_measurement(
             csv_path,
             host,
             metrics,
@@ -82,6 +83,35 @@ def run_single_measurement(host, count, speed_test=False, protocol="auto", port=
             download_mbps,
             upload_mbps,
         )
+        if row is None:
+            print("  Measurement was incomplete or invalid and was not saved.", file=sys.stderr)
+            return False
+
+        if protocol in {"wireguard", "openvpn", "vless"}:
+            try:
+                if not os.path.exists(adaptive_selector.STATE_PATH):
+                    adaptive_selector.train_from_dataset(csv_path, adaptive_selector.STATE_PATH)
+                updated, reward = adaptive_selector.record_measurement_from_row(
+                    protocol=protocol,
+                    timestamp=row.get("timestamp"),
+                    host=row.get("target_host"),
+                    latency=row.get("latency_ms"),
+                    loss=row.get("packet_loss_percent"),
+                    jitter=row.get("jitter_ms"),
+                    download=row.get("download_mbps"),
+                    upload=row.get("upload_mbps"),
+                    state_path=adaptive_selector.STATE_PATH,
+                )
+                if updated:
+                    recommended_protocol, _, recommendation_text = adaptive_selector.recommend_protocol(csv_path, adaptive_selector.STATE_PATH)
+                    print(f"  Selector updated with {protocol} observation.")
+                    print(f"  Recommended protocol: {recommended_protocol}")
+                    print(f"  {recommendation_text}")
+                else:
+                    print("  Selector already contains this measurement; no duplicate update was recorded.")
+            except Exception as exc:
+                print(f"  Warning: selector update failed but measurement was saved: {exc}", file=sys.stderr)
+
         return True
 
     except Exception as exc:

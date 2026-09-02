@@ -11,6 +11,8 @@ import sys
 import time
 from datetime import datetime
 
+import adaptive_selector
+
 CSV_COLUMNS = [
     "timestamp",
     "target_host",
@@ -38,6 +40,24 @@ def run_ping(host, count=4):
 
     output = (result.stdout or "") + (result.stderr or "")
     return result.returncode, output
+
+
+def parse_float_or_none(value):
+    """Normalize numeric values to float while treating missing or invalid inputs as None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        try:
+            parsed = float(stripped)
+        except ValueError:
+            return None
+        return parsed
+    return None
 
 
 def parse_ping_output(output):
@@ -88,9 +108,9 @@ def parse_ping_output(output):
         jitter = 0.0
 
     return {
-        "latency_ms": average_latency if average_latency is not None else 0.0,
-        "packet_loss_pct": packet_loss,
-        "jitter_ms": jitter,
+        "latency_ms": float(average_latency if average_latency is not None else 0.0),
+        "packet_loss_pct": float(packet_loss),
+        "jitter_ms": float(jitter),
         "samples": latencies,
     }
 
@@ -409,6 +429,9 @@ def detect_wireguard_vpn():
 def print_results(host, metrics, protocol="None", vpn_status="Disconnected"):
     """Display the measured network quality in a readable format."""
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    latency_ms = parse_float_or_none(metrics.get("latency_ms"))
+    packet_loss_pct = parse_float_or_none(metrics.get("packet_loss_pct"))
+    jitter_ms = parse_float_or_none(metrics.get("jitter_ms"))
 
     print("\n" + "=" * 60)
     print("AdaptiveVPN-ML Network Quality Monitor")
@@ -417,9 +440,9 @@ def print_results(host, metrics, protocol="None", vpn_status="Disconnected"):
     print(f"Target host: {host}")
     print(f"VPN protocol: {protocol}")
     print(f"VPN status: {vpn_status}")
-    print(f"Ping latency (average): {metrics['latency_ms']:.2f} ms")
-    print(f"Packet loss: {metrics['packet_loss_pct']:.2f}%")
-    print(f"Jitter: {metrics['jitter_ms']:.2f} ms")
+    print(f"Ping latency (average): {latency_ms:.2f} ms" if latency_ms is not None else "Ping latency (average): N/A")
+    print(f"Packet loss: {packet_loss_pct:.2f}%" if packet_loss_pct is not None else "Packet loss: N/A")
+    print(f"Jitter: {jitter_ms:.2f} ms" if jitter_ms is not None else "Jitter: N/A")
     print("=" * 60)
 
 
@@ -473,27 +496,103 @@ def ensure_csv_header(csv_path):
 
 def append_measurement(csv_path, host, metrics, protocol="None", vpn_status="Disconnected", download_mbps="", upload_mbps=""):
     """Append one completed measurement to the CSV dataset."""
+    latency_ms = parse_float_or_none(metrics.get("latency_ms"))
+    packet_loss_pct = parse_float_or_none(metrics.get("packet_loss_pct"))
+    jitter_ms = parse_float_or_none(metrics.get("jitter_ms"))
+
+    if latency_ms is None or packet_loss_pct is None or jitter_ms is None:
+        return None
+
     ensure_csv_header(csv_path)
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     normalized_protocol = normalize_protocol_name(protocol)
     connection_label = get_connection_label(normalized_protocol, vpn_status)
 
+    download_value = None if download_mbps in (None, "") else parse_float_or_none(download_mbps)
+    upload_value = None if upload_mbps in (None, "") else parse_float_or_none(upload_mbps)
+
+    row = [
+        timestamp,
+        host,
+        normalized_protocol,
+        vpn_status,
+        connection_label,
+        f"{latency_ms:.2f}",
+        f"{packet_loss_pct:.2f}",
+        f"{jitter_ms:.2f}",
+        "" if download_value is None else f"{download_value:.2f}",
+        "" if upload_value is None else f"{upload_value:.2f}",
+    ]
+
     with open(csv_path, "a", newline="", encoding="utf-8") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(
-            [
-                timestamp,
-                host,
-                normalized_protocol,
-                vpn_status,
-                connection_label,
-                f"{metrics['latency_ms']:.2f}",
-                f"{metrics['packet_loss_pct']:.2f}",
-                f"{metrics['jitter_ms']:.2f}",
-                download_mbps,
-                upload_mbps,
-            ]
-        )
+        writer.writerow(row)
+
+    return {
+        "timestamp": timestamp,
+        "target_host": host,
+        "protocol": normalized_protocol,
+        "vpn_status": vpn_status,
+        "connection_label": connection_label,
+        "latency_ms": latency_ms,
+        "packet_loss_percent": packet_loss_pct,
+        "jitter_ms": jitter_ms,
+        "download_mbps": download_value,
+        "upload_mbps": upload_value,
+    }
+
+
+def update_selector_from_row(row, csv_path=None, state_path=None):
+    """Persist a completed observation into the UCB1 selector after CSV save."""
+    if row is None:
+        return False, None
+
+    protocol = normalize_protocol_name(row.get("protocol"))
+    if protocol not in adaptive_selector.ARMS:
+        return False, None
+
+    if csv_path is None:
+        csv_path = os.path.join(os.path.dirname(__file__) or ".", "network_data.csv")
+    if state_path is None:
+        state_path = adaptive_selector.STATE_PATH
+
+    current_signature = adaptive_selector.observation_signature(
+        protocol,
+        timestamp=row.get("timestamp"),
+        host=row.get("target_host"),
+        latency=row.get("latency_ms"),
+        loss=row.get("packet_loss_percent"),
+        jitter=row.get("jitter_ms"),
+        download=row.get("download_mbps"),
+        upload=row.get("upload_mbps"),
+    )
+
+    if not os.path.exists(state_path):
+        adaptive_selector.train_from_dataset(csv_path, state_path, exclude_signature=current_signature)
+
+    updated, reward = adaptive_selector.record_measurement_from_row(
+        protocol=protocol,
+        timestamp=row.get("timestamp"),
+        host=row.get("target_host"),
+        latency=row.get("latency_ms"),
+        loss=row.get("packet_loss_percent"),
+        jitter=row.get("jitter_ms"),
+        download=row.get("download_mbps"),
+        upload=row.get("upload_mbps"),
+        state_path=state_path,
+    )
+
+    if updated:
+        recommended_protocol, _, recommendation_text = adaptive_selector.recommend_protocol(csv_path, state_path)
+        print("Measurement saved")
+        print("Selector updated")
+        print(f"Recommended protocol: {recommended_protocol}")
+        print(recommendation_text)
+        return True, (recommended_protocol, recommendation_text)
+
+    print("Measurement saved")
+    print("Selector already contains this observation; duplicate protected.")
+    return False, None
 
 
 def measure_throughput(protocol="auto"):
@@ -601,7 +700,7 @@ def main():
     parser.add_argument(
         "--protocol",
         default="auto",
-        choices=["auto", "wireguard", "openvpn", "vless", "direct"],
+        choices=["auto", "direct", "wireguard", "openvpn", "vless"],
         help="Override protocol detection and record a specific protocol label. Default: auto.",
     )
     args = parser.parse_args()
@@ -633,8 +732,8 @@ def main():
         if output.strip():
             print("Ping output:\n" + output.strip())
 
-        download_mbps = ""
-        upload_mbps = ""
+        download_mbps = None
+        upload_mbps = None
         if args.speed_test:
             download_mbps, upload_mbps = measure_throughput(protocol)
             if download_mbps is not None and upload_mbps is not None:
@@ -642,15 +741,25 @@ def main():
                 print(f"Upload throughput: {upload_mbps:.2f} Mbps")
 
         csv_path = os.path.join(os.path.dirname(__file__) or ".", "network_data.csv")
-        append_measurement(
+        row = append_measurement(
             csv_path,
             args.host,
             metrics,
             protocol,
             vpn_status,
-            "" if download_mbps is None else f"{download_mbps:.2f}",
-            "" if upload_mbps is None else f"{upload_mbps:.2f}",
+            download_mbps,
+            upload_mbps,
         )
+
+        if row is None:
+            print("Measurement was incomplete or invalid and was not saved.", file=sys.stderr)
+            return 1
+
+        try:
+            update_selector_from_row(row, csv_path=csv_path, state_path=adaptive_selector.STATE_PATH)
+        except Exception as exc:  # pragma: no cover - defensive error handling.
+            print(f"Warning: selector update failed after save: {exc}", file=sys.stderr)
+
         return 0
 
     except Exception as exc:  # pragma: no cover - defensive error handling.
