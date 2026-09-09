@@ -71,7 +71,7 @@ def activate_protocol(protocol):
             r"C:\Program Files\OpenVPN Connect\OpenVPNConnect.exe"
         )
         profile = Path(
-            r"C:\Users\user\Downloads\client1-tcp.ovpn"
+            str(Path.home() / "Downloads" / "client1-tcp.ovpn")
         )
         profile_name = "AdaptiveVPN-ML"
 
