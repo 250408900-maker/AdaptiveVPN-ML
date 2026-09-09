@@ -12,6 +12,10 @@ import time
 from datetime import datetime
 
 import adaptive_selector
+try:
+    import vpn_controller
+except ModuleNotFoundError:
+    vpn_controller = None
 
 CSV_COLUMNS = [
     "timestamp",
@@ -588,7 +592,20 @@ def update_selector_from_row(row, csv_path=None, state_path=None):
         print("Selector updated")
         print(f"Recommended protocol: {recommended_protocol}")
         print(recommendation_text)
+
+        if vpn_controller is None:
+            print("Controller warning: vpn_controller is unavailable")
+        else:
+            success, controller_message = vpn_controller.activate_protocol(
+                normalize_protocol_name(recommended_protocol)
+            )
+            label = "Controller" if success else "Controller warning"
+            print(f"{label}: {controller_message}")
+
         return True, (recommended_protocol, recommendation_text)
+
+
+
 
     print("Measurement saved")
     print("Selector already contains this observation; duplicate protected.")

@@ -1,16 +1,16 @@
 # Adaptive Selector Report
 
 - algorithm: UCB1 online learning
-- total observations: 58
-- current recommendation: vless (UCB score=90.796)
+- total observations: 63
+- current recommendation: vless (UCB score=91.990)
 
 ## Protocol breakdown
 
 | protocol | count | average reward | exploration bonus | UCB score |
 | --- | ---: | ---: | ---: | ---: |
-| wireguard | 22 | 81.778 | 0.608 | 82.386 |
-| openvpn | 15 | 58.595 | 0.736 | 59.331 |
-| vless | 21 | 90.174 | 0.622 | 90.796 |
+| wireguard | 23 | 82.570 | 0.600 | 83.171 |
+| openvpn | 16 | 61.183 | 0.720 | 61.903 |
+| vless | 24 | 91.402 | 0.588 | 91.990 |
 
 ## Reward design
 

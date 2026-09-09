@@ -104,3 +104,12 @@ These results are preliminary because the measurements were not collected in ful
 ## Repository hygiene
 
 Sensitive files are excluded from Git by default, including VPN keys, certificates, environment files, local dataset copies, and Python bytecode.
+
+## AdaptiveVPN Dashboard
+
+Install: python -m pip install -r requirements.txt
+
+Run: python -m streamlit run app.py
+
+The dashboard detects VPN protocols, displays measurements, generates ML recommendations, activates configured VPN clients, and creates ML reports.
+
