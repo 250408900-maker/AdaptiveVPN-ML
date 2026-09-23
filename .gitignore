@@ -21,3 +21,7 @@ Thumbs.db
 !reports/
 !reports/*.png
 !reports/*.md
+
+# Network captures and generated datasets
+data/captures/**/*.pcapng
+data/processed/*.csv
