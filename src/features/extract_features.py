@@ -1,28 +1,52 @@
 import argparse
 import csv
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 
-# ============================================================
+# =========================================================
+# PROJECT ROOT
+# =========================================================
+
+# extract_features.py lives here:
+# AdaptiveVPN-ML/src/features/extract_features.py
+#
+# parents[2] = AdaptiveVPN-ML/
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# =========================================================
+# SHARED FEATURE CONTRACT
+# =========================================================
+
+from core.features import WINDOW_SECONDS
+
+
+# =========================================================
 # CONFIGURATION
-# ============================================================
+# =========================================================
 
 TSHARK = r"C:\Program Files\Wireshark\tshark.exe"
 
-# Each ML sample represents 10 seconds of network traffic.
-WINDOW_SIZE = 10.0
+# Every ML sample uses the SAME window size defined in
+# core/features.py.
+WINDOW_SIZE = float(WINDOW_SECONDS)
 
 # Our captures are intentionally 60 seconds long.
-# This is important for ROUTE_FAILURE because TShark may see
-# absolutely no packets during part of an outage.
+# ROUTE_FAILURE may contain periods where TShark sees
+# absolutely no packets. Those silent windows are useful.
 CAPTURE_DURATION = 60.0
 
 # Tiny windows are normally ignored.
-# ROUTE_FAILURE is an exception because zero/low traffic itself
-# can be the useful signal.
+# ROUTE_FAILURE is an exception because zero/low traffic
+# itself can be the useful signal.
 MIN_PACKETS_PER_WINDOW = 20
+
 
 
 # ============================================================
