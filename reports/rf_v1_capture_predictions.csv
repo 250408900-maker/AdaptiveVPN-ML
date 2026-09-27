@@ -1,0 +1,6 @@
+capture_id,actual_label,predicted_label,windows,correct
+high_jitter_003,HIGH_JITTER,HIGH_JITTER,6,True
+high_latency_004,HIGH_LATENCY,HIGH_LATENCY,6,True
+normal_001,NORMAL,NORMAL,36,True
+packet_loss_003,PACKET_LOSS,HIGH_LATENCY,6,False
+route_failure_002,ROUTE_FAILURE,ROUTE_FAILURE,1,True
