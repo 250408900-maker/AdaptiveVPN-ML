@@ -20,9 +20,10 @@ while ((Get-Date) -lt $end) {
 
     # HTTPS traffic
     curl.exe -L `
-        --silent `
-        --output NUL `
-        "https://example.com"
+    --silent `
+    --max-time 2 `
+    --output NUL `
+    "https://example.com"
 
     # ICMP traffic
     ping.exe 1.1.1.1 -n 1 | Out-Null
