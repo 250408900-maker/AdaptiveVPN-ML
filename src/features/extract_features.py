@@ -187,19 +187,20 @@ def main():
     # --------------------------------------------------------
 
     fields = [
-        "frame.time_relative",
-        "frame.len",
-        "ip.proto",
-        "ip.src",
-        "ip.dst",
-        "tcp.srcport",
-        "tcp.dstport",
-        "udp.srcport",
-        "udp.dstport",
-        "tcp.analysis.retransmission",
-        "tcp.flags.reset",
-        "tcp.analysis.ack_rtt",
-    ]
+    "frame.time_relative",
+    "frame.len",
+    "ip.proto",
+    "ip.src",
+    "ip.dst",
+    "tcp.srcport",
+    "tcp.dstport",
+    "tcp.len",
+    "udp.srcport",
+    "udp.dstport",
+    "tcp.analysis.retransmission",
+    "tcp.flags.reset",
+    "tcp.analysis.ack_rtt",
+]
 
     command = [
         TSHARK,
@@ -291,6 +292,7 @@ def main():
             ip_dst,
             tcp_srcport,
             tcp_dstport,
+            tcp_len,
             udp_srcport,
             udp_dstport,
             retransmission,
@@ -414,8 +416,10 @@ def main():
         # ----------------------------------------------------
 
         if retransmission:
+            tcp_len_value = safe_int(tcp_len)
 
-            w["retransmissions"] += 1
+            if tcp_len_value is not None and tcp_len_value > 0:
+                w["retransmissions"] += 1
 
         # ----------------------------------------------------
         # TCP RESET
