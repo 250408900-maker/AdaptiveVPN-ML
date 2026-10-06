@@ -1,8 +1,8 @@
 import argparse
 import csv
+import statistics
 import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 
@@ -10,10 +10,6 @@ from pathlib import Path
 # PROJECT ROOT
 # =========================================================
 
-# extract_features.py lives here:
-# AdaptiveVPN-ML/src/features/extract_features.py
-#
-# parents[2] = AdaptiveVPN-ML/
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -33,25 +29,19 @@ from core.features import WINDOW_SECONDS
 
 TSHARK = r"C:\Program Files\Wireshark\tshark.exe"
 
-# Every ML sample uses the SAME window size defined in
-# core/features.py.
 WINDOW_SIZE = float(WINDOW_SECONDS)
 
-# Our captures are intentionally 60 seconds long.
-# ROUTE_FAILURE may contain periods where TShark sees
-# absolutely no packets. Those silent windows are useful.
+# Controlled captures are 60 seconds long.
 CAPTURE_DURATION = 60.0
 
-# Tiny windows are normally ignored.
-# ROUTE_FAILURE is an exception because zero/low traffic
-# itself can be the useful signal.
+# Tiny windows are ignored for ordinary conditions.
+# ROUTE_FAILURE keeps them because silence itself is useful.
 MIN_PACKETS_PER_WINDOW = 20
 
 
-
-# ============================================================
+# =========================================================
 # HELPERS
-# ============================================================
+# =========================================================
 
 def safe_float(value):
     try:
@@ -68,9 +58,7 @@ def safe_int(value):
 
 
 def make_window():
-    """
-    Create an empty 10-second feature window.
-    """
+    """Create an empty feature window."""
 
     return {
         "packet_count": 0,
@@ -85,15 +73,15 @@ def make_window():
     }
 
 
-# ============================================================
+# =========================================================
 # MAIN
-# ============================================================
+# =========================================================
 
 def main():
 
-    # --------------------------------------------------------
-    # COMMAND-LINE ARGUMENTS
-    # --------------------------------------------------------
+    # -----------------------------------------------------
+    # ARGUMENTS
+    # -----------------------------------------------------
 
     parser = argparse.ArgumentParser(
         description="Extract ML network features from a PCAP/PCAPNG file."
@@ -115,16 +103,6 @@ def main():
         help="Optional custom output CSV path",
     )
 
-    # These options allow us to keep only the portion where a
-    # temporary condition was actually active.
-    #
-    # Example:
-    #
-    # --active-start 30 --active-end 60
-    #
-    # means:
-    # keep 30-40, 40-50 and 50-60 second windows.
-
     parser.add_argument(
         "--active-start",
         type=float,
@@ -144,9 +122,9 @@ def main():
     pcap = Path(args.pcap)
     label = args.label.upper()
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # VALIDATION
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     if not pcap.exists():
         raise FileNotFoundError(
@@ -158,16 +136,13 @@ def main():
             f"TShark not found: {TSHARK}"
         )
 
-    # --------------------------------------------------------
-    # OUTPUT PATH
-    # --------------------------------------------------------
+    # -----------------------------------------------------
+    # OUTPUT
+    # -----------------------------------------------------
 
     if args.output:
-
         output = Path(args.output)
-
     else:
-
         output = (
             Path("data")
             / "processed"
@@ -182,25 +157,25 @@ def main():
     print(f"Reading {pcap} ...")
     print(f"Label: {label}")
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # TSHARK FIELDS
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     fields = [
-    "frame.time_relative",
-    "frame.len",
-    "ip.proto",
-    "ip.src",
-    "ip.dst",
-    "tcp.srcport",
-    "tcp.dstport",
-    "tcp.len",
-    "udp.srcport",
-    "udp.dstport",
-    "tcp.analysis.retransmission",
-    "tcp.flags.reset",
-    "tcp.analysis.ack_rtt",
-]
+        "frame.time_relative",
+        "frame.len",
+        "ip.proto",
+        "ip.src",
+        "ip.dst",
+        "tcp.srcport",
+        "tcp.dstport",
+        "tcp.len",
+        "udp.srcport",
+        "udp.dstport",
+        "tcp.analysis.retransmission",
+        "tcp.flags.reset",
+        "tcp.analysis.ack_rtt",
+    ]
 
     command = [
         TSHARK,
@@ -215,13 +190,11 @@ def main():
     ]
 
     for field in fields:
-        command.extend(
-            ["-e", field]
-        )
+        command.extend(["-e", field])
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # RUN TSHARK
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     result = subprocess.run(
         command,
@@ -232,34 +205,13 @@ def main():
     )
 
     if result.returncode != 0:
-
         raise RuntimeError(
-            "TShark failed:\n"
-            + result.stderr
+            "TShark failed:\n" + result.stderr
         )
 
-    # --------------------------------------------------------
-    # CREATE ALL SIX WINDOWS FIRST
-    # --------------------------------------------------------
-    #
-    # THIS IS THE IMPORTANT FIX.
-    #
-    # We know the capture lasts 60 seconds.
-    #
-    # Therefore:
-    #
-    # 0-10
-    # 10-20
-    # 20-30
-    # 30-40
-    # 40-50
-    # 50-60
-    #
-    # are created BEFORE reading packets.
-    #
-    # If Wi-Fi disappears completely during one of these
-    # periods, that window remains present with zeros.
-    # --------------------------------------------------------
+    # -----------------------------------------------------
+    # CREATE ALL SIX WINDOWS
+    # -----------------------------------------------------
 
     total_windows = int(
         CAPTURE_DURATION / WINDOW_SIZE
@@ -272,15 +224,14 @@ def main():
 
     packet_seen = False
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # PARSE PACKETS
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     for line in result.stdout.splitlines():
 
         parts = line.split("\t")
 
-        # Ensure we always have enough columns.
         while len(parts) < len(fields):
             parts.append("")
 
@@ -300,24 +251,21 @@ def main():
             ack_rtt,
         ) = parts[:len(fields)]
 
-        timestamp = safe_float(
-            time_relative
-        )
+        timestamp = safe_float(time_relative)
 
         if timestamp is None:
             continue
 
         packet_seen = True
 
-        # ----------------------------------------------------
-        # FIND WINDOW
-        # ----------------------------------------------------
+        # -------------------------------------------------
+        # WINDOW
+        # -------------------------------------------------
 
         window_id = int(
             timestamp // WINDOW_SIZE
         )
 
-        # Ignore anything outside the expected 60 seconds.
         if window_id < 0:
             continue
 
@@ -326,53 +274,42 @@ def main():
 
         w = windows[window_id]
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # PACKET COUNT
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
         w["packet_count"] += 1
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # TOTAL BYTES
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
-        length = safe_int(
-            frame_len
-        )
+        length = safe_int(frame_len)
 
         if length is not None:
             w["total_bytes"] += length
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # PROTOCOL COUNTS
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
-        proto = safe_int(
-            ip_proto
-        )
+        proto = safe_int(ip_proto)
 
-        # TCP
         if proto == 6:
-
             w["tcp_packets"] += 1
 
-        # UDP
         elif proto == 17:
-
             w["udp_packets"] += 1
 
-        # ICMP
         elif proto == 1:
-
             w["icmp_packets"] += 1
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # FLOW COUNT
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
         if ip_src and ip_dst:
 
-            # TCP flow
             if tcp_srcport or tcp_dstport:
 
                 flow = (
@@ -385,7 +322,6 @@ def main():
 
                 w["flows"].add(flow)
 
-            # UDP flow
             elif udp_srcport or udp_dstport:
 
                 flow = (
@@ -398,7 +334,6 @@ def main():
 
                 w["flows"].add(flow)
 
-            # Other IP protocol
             else:
 
                 flow = (
@@ -411,55 +346,51 @@ def main():
 
                 w["flows"].add(flow)
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # RETRANSMISSIONS
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
         if retransmission:
+
             tcp_len_value = safe_int(tcp_len)
 
-            if tcp_len_value is not None and tcp_len_value > 0:
+            if (
+                tcp_len_value is not None
+                and tcp_len_value > 0
+            ):
                 w["retransmissions"] += 1
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # TCP RESET
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
         if tcp_reset:
 
             try:
 
-                if int(
-                    tcp_reset,
-                    0
-                ) == 1:
-
+                if int(tcp_reset, 0) == 1:
                     w["tcp_resets"] += 1
 
             except ValueError:
-
                 pass
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # ACK RTT
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
-        rtt = safe_float(
-            ack_rtt
-        )
+        rtt = safe_float(ack_rtt)
 
         if rtt is not None:
 
-            # TShark gives ACK RTT in seconds.
+            # TShark reports ACK RTT in seconds.
             # Convert to milliseconds.
-
             w["rtt_values"].append(
                 rtt * 1000
             )
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # SAFETY CHECK
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     if not packet_seen:
 
@@ -467,78 +398,52 @@ def main():
             f"No usable packets were extracted from {pcap}"
         )
 
-    # --------------------------------------------------------
-    # CONVERT WINDOWS TO ML FEATURE ROWS
-    # --------------------------------------------------------
+    # -----------------------------------------------------
+    # CONVERT WINDOWS TO FEATURE ROWS
+    # -----------------------------------------------------
 
     rows = []
 
-    for window_id in sorted(
-        windows.keys()
-    ):
+    for window_id in sorted(windows.keys()):
 
         w = windows[window_id]
 
         window_start = (
-            window_id
-            * WINDOW_SIZE
+            window_id * WINDOW_SIZE
         )
 
         window_end = (
-            (window_id + 1)
-            * WINDOW_SIZE
+            (window_id + 1) * WINDOW_SIZE
         )
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # OPTIONAL ACTIVE INTERVAL
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
         if args.active_start is not None:
 
-            if (
-                window_start
-                < args.active_start
-            ):
-
+            if window_start < args.active_start:
                 continue
 
         if args.active_end is not None:
 
-            if (
-                window_end
-                > args.active_end
-            ):
-
+            if window_end > args.active_end:
                 continue
 
-        # ----------------------------------------------------
-        # REMOVE TINY WINDOWS FOR ORDINARY CONDITIONS
-        # ----------------------------------------------------
-        #
-        # Do NOT do this for ROUTE_FAILURE.
-        #
-        # A route failure can legitimately produce:
-        #
-        # packet_count = 0
-        # total_bytes = 0
-        # throughput = 0
-        # flow_count = 0
-        #
-        # Those zeros are useful ML information.
-        # ----------------------------------------------------
+        # -------------------------------------------------
+        # REMOVE TINY ORDINARY WINDOWS
+        # -------------------------------------------------
 
         if (
             label != "ROUTE_FAILURE"
-            and
-            w["packet_count"]
+            and w["packet_count"]
             < MIN_PACKETS_PER_WINDOW
         ):
-
             continue
 
-        # ----------------------------------------------------
-        # RETRANSMISSION RATE
-        # ----------------------------------------------------
+        # -------------------------------------------------
+        # RETRANSMISSION / RESET RATES
+        # -------------------------------------------------
 
         if w["tcp_packets"] > 0:
 
@@ -557,55 +462,55 @@ def main():
             retransmission_rate = 0.0
             reset_rate = 0.0
 
-        # ----------------------------------------------------
-        # AVERAGE RTT
-        # ----------------------------------------------------
+        # -------------------------------------------------
+        # RTT FEATURES
+        # -------------------------------------------------
 
         if w["rtt_values"]:
 
             avg_rtt = (
-                sum(
-                    w["rtt_values"]
-                )
-                / len(
-                    w["rtt_values"]
-                )
+                sum(w["rtt_values"])
+                / len(w["rtt_values"])
             )
+
+            # THIS is our new jitter feature.
+            # High values = RTT varies heavily inside
+            # the 10-second observation window.
+            if len(w["rtt_values"]) > 1:
+
+                std_rtt = statistics.pstdev(
+                    w["rtt_values"]
+                )
+
+            else:
+                std_rtt = 0.0
 
         else:
 
             avg_rtt = 0.0
+            std_rtt = 0.0
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # THROUGHPUT
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
         throughput_kbps = (
-            (
-                w["total_bytes"]
-                * 8
-            )
+            (w["total_bytes"] * 8)
             / WINDOW_SIZE
             / 1000
         )
 
-        # ----------------------------------------------------
+        # -------------------------------------------------
         # FINAL FEATURE ROW
-        # ----------------------------------------------------
+        # -------------------------------------------------
 
         row = {
 
             "window_start_s":
-                round(
-                    window_start,
-                    2
-                ),
+                round(window_start, 2),
 
             "window_end_s":
-                round(
-                    window_end,
-                    2
-                ),
+                round(window_end, 2),
 
             "packet_count":
                 w["packet_count"],
@@ -620,9 +525,7 @@ def main():
                 ),
 
             "flow_count":
-                len(
-                    w["flows"]
-                ),
+                len(w["flows"]),
 
             "tcp_packets":
                 w["tcp_packets"],
@@ -657,15 +560,22 @@ def main():
                     3
                 ),
 
+            # NEW FEATURE FOR HIGH_JITTER
+            "std_tcp_ack_rtt_ms":
+                round(
+                    std_rtt,
+                    3
+                ),
+
             "label":
                 label,
         }
 
         rows.append(row)
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # CHECK RESULT
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     if not rows:
 
@@ -673,9 +583,9 @@ def main():
             "No feature windows remained after filtering."
         )
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # SAVE CSV
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     fieldnames = list(
         rows[0].keys()
@@ -693,14 +603,11 @@ def main():
         )
 
         writer.writeheader()
+        writer.writerows(rows)
 
-        writer.writerows(
-            rows
-        )
-
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # FINISHED
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     print(
         f"Created {len(rows)} windows"
