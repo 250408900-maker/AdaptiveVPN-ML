@@ -1,4 +1,4 @@
-
+﻿
 import math
 
 
@@ -44,16 +44,11 @@ class DecisionEngine:
             and float(tcp_mean_ms) >= self.high_latency_ms
         )
 
-        degraded_prediction = prediction in (
-            "HIGH_LATENCY",
-            "PACKET_LOSS",
-        )
-
         # For now, require both measured high latency
         # and a degraded ML prediction.
         # The model vote is logged, but it cannot veto
         # repeated objective latency measurements.
-        if measured_high_latency and degraded_prediction:
+        if measured_high_latency:
             self.degraded_count += 1
 
             if self.degraded_count < self.required_windows:
@@ -113,3 +108,5 @@ if __name__ == "__main__":
             f"Window {index}: {prediction} "
             f"-> {action} | {reason}"
         )
+
+
