@@ -11,6 +11,7 @@ import pandas as pd
 
 from experiments.collect_windows_live import measure_window
 from src.monitor.decision_engine import DecisionEngine
+from src.monitor.reachability import assess_reachability
 
 
 def main():
@@ -38,7 +39,7 @@ def main():
         "tcp_connect_std_ms", "tcp_failure_pct",
         "icmp_nonresponse_pct", "interface_before",
         "interface_after", "route_stable",
-        "prediction", "confidence", "routing_action",
+        "reachability", "prediction", "confidence", "routing_action",
         "reason", "vpn_path_verified",
     ]
 
@@ -53,12 +54,22 @@ def main():
 
             values = [float(measurement[name]) for name in features]
 
-            if not all(math.isfinite(value) for value in values):
+            reachability = assess_reachability(
+                measurement["tcp_connect_mean_ms"],
+                measurement["tcp_failure_pct"],
+            )
+
+            if reachability == "PATH_UNREACHABLE":
+                prediction = "NOT_EVALUATED"
+                confidence = 0.0
+                action = "MONITOR"
+                reason = "Observed TCP outage; ML inference skipped"
+                engine = DecisionEngine(required_windows=3)
+            elif not all(math.isfinite(value) for value in values):
                 prediction = "INVALID_MEASUREMENT"
                 confidence = 0.0
                 action = "MONITOR"
-                reason = "Insufficient valid TCP measurements"
-                # Reset consecutive-window state after invalid data.
+                reason = "Insufficient valid network measurements"
                 engine = DecisionEngine(required_windows=3)
             else:
                 frame = pd.DataFrame([values], columns=features)
@@ -74,6 +85,7 @@ def main():
             # An evaluation request is NOT permission to switch.
             row = {
                 **{key: measurement[key] for key in fields if key in measurement},
+                "reachability": reachability,
                 "prediction": prediction,
                 "confidence": round(confidence, 4),
                 "routing_action": action,
