@@ -45,3 +45,31 @@ class AdaptiveRoutingController:
             current_route.name,
             comparison_reason,
         )
+
+    def evaluate_with_evidence(
+        self,
+        prediction,
+        confidence,
+        current_route,
+        alternatives,
+        path_evidence=None,
+    ):
+        """Do not recommend a switch without independently verified probes."""
+        action, selected, reason = self.evaluate(
+            prediction,
+            confidence,
+            current_route,
+            alternatives,
+        )
+
+        if action != "RECOMMEND_SWITCH":
+            return action, selected, reason
+
+        # The existing route-inspection module reports route-selection
+        # evidence only. That is NOT sufficient to verify VPN traffic.
+        return (
+            "MONITOR",
+            current_route.name,
+            "Switch blocked: actual probe-to-VPN-path verification "
+            "has not been implemented",
+        )
