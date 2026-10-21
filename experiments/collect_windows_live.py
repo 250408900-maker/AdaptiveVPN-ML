@@ -56,6 +56,12 @@ def icmp_probe(host):
 
 
 def measure_window(host, port, window_seconds=10, attempts=5):
+    if attempts < 1:
+        raise ValueError('attempts must be at least 1')
+    if window_seconds <= 0:
+        raise ValueError('window_seconds must be positive')
+    if not 1 <= port <= 65535:
+        raise ValueError('port must be between 1 and 65535')
     before = inspect_current_route(host)
     started = time.monotonic()
 
@@ -89,11 +95,16 @@ def measure_window(host, port, window_seconds=10, attempts=5):
     before_interface = before.get("interface")
     after_interface = after.get("interface")
 
+    before_index = before.get("interface_index")
+    after_index = after.get("interface_index")
+
     stable = (
         before.get("status") == "ROUTE_OBSERVED"
         and after.get("status") == "ROUTE_OBSERVED"
         and bool(before_interface)
         and before_interface == after_interface
+        and before_index is not None
+        and before_index == after_index
     )
 
     return {
