@@ -12,6 +12,7 @@ import pandas as pd
 from experiments.collect_windows_live import measure_window
 from src.monitor.decision_engine import DecisionEngine
 from src.monitor.reachability import assess_reachability
+from src.monitor.outage_decision import OutageDecisionTracker
 
 
 def main():
@@ -28,6 +29,7 @@ def main():
     model = bundle["model"]
     features = list(bundle["features"])
     engine = DecisionEngine(required_windows=3)
+    outage_tracker = OutageDecisionTracker(required_windows=3)
 
     output_dir = Path("data/processed/live")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +65,7 @@ def main():
                 prediction = "NOT_EVALUATED"
                 confidence = 0.0
                 action = "MONITOR"
-                reason = "Observed TCP outage; ML inference skipped"
+                action, reason = outage_tracker.evaluate(reachability)
                 engine = DecisionEngine(required_windows=3)
             elif not all(math.isfinite(value) for value in values):
                 prediction = "INVALID_MEASUREMENT"
@@ -72,6 +74,7 @@ def main():
                 reason = "Insufficient valid network measurements"
                 engine = DecisionEngine(required_windows=3)
             else:
+                outage_tracker.evaluate(reachability)
                 frame = pd.DataFrame([values], columns=features)
                 prediction = str(model.predict(frame)[0])
                 confidence = float(max(model.predict_proba(frame)[0]))
