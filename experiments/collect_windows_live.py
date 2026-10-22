@@ -1,3 +1,4 @@
+import platform
 """Live Windows network measurements for AdaptiveVPN-ML.
 
 Read-only measurement collector. Does not connect or switch VPNs.
@@ -12,7 +13,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.monitor.route_evidence import inspect_current_route
+from src.monitor.route_evidence import inspect_current_route as inspect_windows_route
+from src.monitor.linux_route_lookup import inspect_linux_route
+
+def inspect_current_route(destination):
+    if platform.system() == "Linux":
+        return inspect_linux_route(destination)
+    return inspect_windows_route(destination)
+
 
 
 FIELDS = [
@@ -45,7 +53,11 @@ def tcp_probe(host, port, timeout=2.0):
 def icmp_probe(host):
     try:
         result = subprocess.run(
-            ["ping", "-n", "1", "-w", "1000", host],
+            (
+                ["ping", "-c", "1", "-W", "1", host]
+                if platform.system() == "Linux"
+                else ["ping", "-n", "1", "-w", "1000", host]
+            ),
             capture_output=True,
             timeout=4,
             check=False,
@@ -103,8 +115,14 @@ def measure_window(host, port, window_seconds=10, attempts=5):
         and after.get("status") == "ROUTE_OBSERVED"
         and bool(before_interface)
         and before_interface == after_interface
-        and before_index is not None
-        and before_index == after_index
+        and (
+            (before_index is not None and before_index == after_index)
+            or (
+                platform.system() == "Linux"
+                and before_index is None
+                and after_index is None
+            )
+        )
     )
 
     return {
